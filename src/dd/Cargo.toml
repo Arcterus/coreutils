@@ -1,0 +1,33 @@
+[package]
+name = "dd"
+version = "0.0.1"
+authors = ["Alex Lyon <arcterus@mail.com>"]
+build = "../../mkmain.rs"
+
+[lib]
+name = "uu_dd"
+path = "dd.rs"
+
+[dependencies]
+libc = "0.2.26"
+walkdir = "1.0.7"
+quick-error = "1.1.0"
+uucore = { path="../uucore" }
+filetime = "0.1"
+term = "0.4.6"
+number_prefix = "0.2.7"
+humantime = "1.0.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ioctl-sys = "0.5.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+kernel32-sys = "*"
+winapi = "*"
+
+[target.'cfg(unix)'.dependencies]
+xattr="0.2.1"
+
+[[bin]]
+name = "dd"
+path = "../../uumain.rs"
