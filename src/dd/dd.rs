@@ -461,10 +461,30 @@ fn display_progress<T: Write>(output: &mut Terminal<Output = T>, duration: Durat
         Prefixed(prefix, bytes) => (bytes, prefix.symbol())
     };
 
-    // FIXME: this needs to be formatted for more than just seconds
-    let time = duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9;
+    // XXX: could not figure out how to do this just using a format string
+    let time_int = duration.as_secs();
+    let time_dec = duration.subsec_nanos() as f64 * 1e-9;
+    let time = time_int as f64 + time_dec;
+    let int_digits = count_digits(time_int);
+    let dec_digits = if int_digits > 6 || time_dec < f64::powf(0.1, (6 - int_digits) as f64) {
+        0
+    } else {
+        6 - int_digits
+    } as usize;
 
-    write!(output, "{} bytes ({:.0} {}B, {:.0} {}B) copied, {:.5} s, {:.1} {}B/s", written, decimal, dec_prefix, binary, bin_prefix, time, transfer, transfer_prefix)?;
+    write!(output, "{} bytes ({:.0} {}B, {:.0} {}B) copied, {:#.time_width$} s, {:.1} {}B/s",
+           written, decimal, dec_prefix, binary, bin_prefix, time, transfer, transfer_prefix,
+           time_width = dec_digits)?;
 
     Ok(())
 }
+
+fn count_digits(mut num: u64) -> u32 {
+    let mut count = 0;
+    while num > 0 {
+        count += 1;
+        num /= 10;
+    }
+    count
+}
+
