@@ -17,12 +17,10 @@ extern crate term;
 
 use number_prefix::{PrefixNames, Standalone, Prefixed};
 use term::Terminal;
-use std::ffi::{CString, OsStr};
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use quick_error::ResultExt;
 use std::convert::From;
 use std::num::ParseIntError;
-use std::path::{Path, PathBuf, StripPrefixError};
 use std::str::FromStr;
 use std::fs::File;
 use std::time::{Duration, Instant};
@@ -43,6 +41,25 @@ struct Options<'a> {
     conv: Vec<Conversion>,
     iflag: Vec<Flag>,
     oflag: Vec<Flag>
+}
+
+impl<'a> Default for Options<'a> {
+    fn default() -> Options<'a> {
+        Options {
+            input_file: None,
+            output_file: None,
+            ibs: 512,
+            obs: 512,
+            cbs: None,
+            skip: None,
+            seek: None,
+            count: None,
+            status: Status::Default,
+            conv: vec![],
+            iflag: vec![],
+            oflag: vec![],
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -98,54 +115,43 @@ enum Flag {
 }
 
 fn parse_arguments<T: AsRef<OsStr>>(args: &[T]) -> Result<Options> {
-    let mut input_file = None;
-    let mut output_file = None;
-    let mut ibs = 512;
-    let mut obs = 512;
-    let mut cbs = None;
-    let mut skip = None;
-    let mut seek = None;
-    let mut count = None;
-    let mut status = Status::Default;
-    let mut conv = vec![];
-    let mut iflag = vec![];
-    let mut oflag = vec![];
+    let mut options = Options::default();
 
     for arg in args {
         let (option, param) = split_string(arg.as_ref())?;
         match option.to_str() {
             Some("if") => {
-                input_file = Some(param);
+                options.input_file = Some(param);
             },
             Some("of") => {
-                output_file = Some(param);
+                options.output_file = Some(param);
             },
             Some("ibs") => {
                 // TODO: this (and the others) should accept stuff like 1M and 4k
-                ibs = convert(param)?;
+                options.ibs = convert(param)?;
             },
             Some("obs") => {
-                obs = convert(param)?;
+                options.obs = convert(param)?;
             },
             Some("bs") => {
                 let size = convert(param)?;
-                ibs = size;
-                obs = size;
+                options.ibs = size;
+                options.obs = size;
             }
             Some("cbs") => {
-                cbs = Some(convert(param)?);
+                options.cbs = Some(convert(param)?);
             }
             Some("skip") => {
-                skip = Some(convert(param)?);
+                options.skip = Some(convert(param)?);
             }
             Some("seek") => {
-                seek = Some(convert(param)?);
+                options.seek = Some(convert(param)?);
             }
             Some("count") => {
-                count = Some(convert(param)?);
+                options.count = Some(convert(param)?);
             }
             Some("status") => {
-                status = match param.to_str() {
+                options.status = match param.to_str() {
                     Some("none") => Status::None,
                     Some("noxfer") => Status::NoTransfer,
                     Some("progress") => Status::Progress,
@@ -156,30 +162,13 @@ fn parse_arguments<T: AsRef<OsStr>>(args: &[T]) -> Result<Options> {
                 };
             }
             Some("conv") => {
-                parse_conv(&mut conv, param)?;
+                parse_conv(&mut options.conv, param)?;
             }
             _ => {
                 return Err(Error::InvalidArgument(format!("{}", option.to_string_lossy())));
             }
         }
     }
-
-    // TODO: check validity of args down here (e.g. make sure ones that required other args to be
-    //       specified have the required ones actually present)
-    let options = Options {
-        input_file: input_file,
-        output_file: output_file,
-        ibs: ibs,
-        obs: obs,
-        cbs: cbs,
-        skip: skip,
-        seek: seek,
-        count: count,
-        status: status,
-        conv: conv,
-        iflag: iflag,
-        oflag: oflag
-    };
 
     validate_options(options)
 }
