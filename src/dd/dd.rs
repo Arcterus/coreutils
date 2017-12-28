@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf, StripPrefixError};
 use std::str::FromStr;
 use std::fs::File;
 use std::time::{Duration, Instant};
-use std::io::{self, Read, Write, BufReader, BufWriter, ErrorKind};
+use std::io::{self, Read, Write, ErrorKind};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -342,12 +342,12 @@ quick_error! {
 pub fn uumain(args: Vec<String>) -> i32 {
     let options = crash_if_err!(1, parse_arguments(&args[1..]));
 
-    // TODO: not sure we should actually be using BufReader/BufWriter and locked stdin/stdout
+    // XXX: should we actually be using locked stdin/stdout?
     // TODO: handle iflag
-    let mut stdin;
-    let mut reader = if let Some(pathstr) = options.input_file {
+    let stdin;
+    let reader = if let Some(pathstr) = options.input_file {
         stdin = None;
-        Box::new(BufReader::new(crash_if_err!(1, File::open(pathstr)))) as Box<Read>
+        Box::new(crash_if_err!(1, File::open(pathstr))) as Box<Read>
     } else {
         stdin = Some(io::stdin());
         let reader = Box::new(stdin.as_ref().unwrap().lock());
@@ -355,10 +355,10 @@ pub fn uumain(args: Vec<String>) -> i32 {
     };
 
     // TODO: handle oflag
-    let mut stdout;
-    let mut writer = if let Some(pathstr) = options.output_file {
+    let stdout;
+    let writer = if let Some(pathstr) = options.output_file {
         stdout = None;
-        Box::new(BufWriter::new(crash_if_err!(1, File::create(pathstr)))) as Box<Write>
+        Box::new(crash_if_err!(1, File::create(pathstr))) as Box<Write>
     } else {
         stdout = Some(io::stdout());
         let writer = Box::new(stdout.as_ref().unwrap().lock());
@@ -375,36 +375,53 @@ pub fn uumain(args: Vec<String>) -> i32 {
 }
 
 fn exec<R: Read, W: Write>(options: Options, mut reader: R, mut writer: W) -> Result<()> {
-    let mut buffer = vec![0; options.ibs as usize]; //Vec::with_capacity(options.ibs as usize);
-    let mut idx = 0;
+    #[derive(Default)]
+    struct Block {
+        full: u64,
+        partial: u64
+    }
+
+    let mut buffer = vec![0; options.ibs as usize];
 
     let one_sec = Duration::from_secs(1);
     let now = Instant::now();
     let mut timer = now.clone();
 
     let mut written = 0;
+    let mut inblocks = Block::default();
+    let mut outblocks = Block::default();
 
     let mut stderr = term::stderr().ok_or_else(|| {
         Error::StderrTerminal
     })?;
 
     loop {
-        match reader.read(&mut buffer[idx..]) {
-            Ok(size) if size == 0 => {
-                flush_buffer(&options, &mut writer, idx, &buffer)?;
-                break;
-            }
-            Ok(size) if size + idx == options.ibs as usize => {
-                // time to actually write the buffer
+        match reader.read(&mut buffer) {
+            Ok(size) if size == 0 => break,
+            Ok(size) => {
+                if (size as u64) < options.ibs {
+                    // TODO: i think GNU dd warns if this occurs and suggests using iflag=fullblock
+                    inblocks.partial += 1;
+                } else {
+                    inblocks.full += 1;
+                }
+
+                // write the buffer
                 // TODO: make this actually heed obs
                 writer.write_all(&buffer)?;
+
+                // FIXME: when this heeds obs, all the "ibs" below should be changed to obs
+                if (size as u64) < options.ibs {
+                    outblocks.partial += 1;
+                } else {
+                    outblocks.full += 1;
+                }
+
                 written += options.ibs;
             }
-            Ok(size) => idx += size,
             Err(ref err) if err.kind() == ErrorKind::BrokenPipe => {
                 // FIXME: might need to set a flag if it's a broken pipe to avoid printing or
                 // something later
-                flush_buffer(&options, &mut writer, idx, &buffer)?;
                 break;
             }
             Err(err) => return Err(err.into())
@@ -413,21 +430,26 @@ fn exec<R: Read, W: Write>(options: Options, mut reader: R, mut writer: W) -> Re
         if options.status == Status::Progress {
             if timer.elapsed() >= one_sec {
                 timer += one_sec;
-                // TODO: print progress on stderr
                 display_progress(&mut *stderr, now.elapsed(), written)?;
             }
         }
     }
 
-    // TODO: check status stuff for progress or whatever
-
-    Ok(())
-}
-
-fn flush_buffer<W: Write>(options: &Options, writer: &mut W, idx: usize, buffer: &[u8]) -> Result<()> {
-    if idx != 0 {
-        writer.write_all(&buffer[0..idx])?;
+    // TODO: check if pipe error?
+    // TODO: need to check if ctrl-c so we can print status info when it occurs
+    if options.status == Status::Progress {
+        writeln!(stderr)?;
     }
+    if options.status != Status::None {
+        writeln!(stderr, "{}+{} records in", inblocks.full, inblocks.partial)?;
+        writeln!(stderr, "{}+{} records out", outblocks.full, outblocks.partial)?;
+
+        if options.status != Status::NoTransfer {
+            display_progress(&mut *stderr, now.elapsed(), written)?;
+            writeln!(stderr)?;
+        }
+    }
+
     Ok(())
 }
 
