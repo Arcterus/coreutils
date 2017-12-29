@@ -14,6 +14,7 @@
 #[macro_use] extern crate quick_error;
 extern crate number_prefix;
 extern crate term;
+extern crate libc;
 
 use number_prefix::{PrefixNames, Standalone, Prefixed};
 use term::Terminal;
@@ -22,7 +23,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::convert::From;
 use std::num::ParseIntError;
 use std::str::FromStr;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::{Duration, Instant};
 use std::io::{self, Read, Write, ErrorKind};
 
@@ -93,6 +95,7 @@ enum Conversion {
 }
 
 /// File flags for use with the iflag and oflag options
+#[derive(PartialEq)]
 enum Flag {
     Append,
     Concurrent,
@@ -114,6 +117,7 @@ enum Flag {
     SeekBytes
 }
 
+// TODO: add --help and --version
 fn parse_arguments<T: AsRef<OsStr>>(args: &[T]) -> Result<Options> {
     let mut options = Options::default();
 
@@ -331,31 +335,27 @@ quick_error! {
 pub fn uumain(args: Vec<String>) -> i32 {
     let options = crash_if_err!(1, parse_arguments(&args[1..]));
 
-    // XXX: should we actually be using locked stdin/stdout?
-    // TODO: handle iflag
-    let stdin;
-    let reader = if let Some(pathstr) = options.input_file {
-        stdin = None;
-        Box::new(crash_if_err!(1, File::open(pathstr))) as Box<Read>
-    } else {
-        stdin = Some(io::stdin());
-        let reader = Box::new(stdin.as_ref().unwrap().lock());
-        reader as Box<Read>
-    };
+    match process_options(&options) {
+        Ok(mut out_file) => {
+            // FIXME: i am not actually sure when this should occur
+            if options.conv.contains(&Conversion::FileSync) {
+                if let Some(ref mut file) = out_file {
+                    return_if_err!(1, file.sync_all());
+                } else {
+                    // TODO: throw error or something prob
+                    unimplemented!();
+                }
+            } else if options.conv.contains(&Conversion::FileDataSync) {
+                if let Some(ref mut file) = out_file {
+                    return_if_err!(1, file.sync_data());
+                } else {
+                    // TODO: throw error or something prob
+                    unimplemented!();
+                }
+            }
 
-    // TODO: handle oflag
-    let stdout;
-    let writer = if let Some(pathstr) = options.output_file {
-        stdout = None;
-        Box::new(crash_if_err!(1, File::create(pathstr))) as Box<Write>
-    } else {
-        stdout = Some(io::stdout());
-        let writer = Box::new(stdout.as_ref().unwrap().lock());
-        writer as Box<Write>
-    };
-
-    match exec(options, reader, writer) {
-        Ok(()) => 0,
+            0
+        }
         Err(err) => {
             show_error!("{}", err);
             1
@@ -363,7 +363,68 @@ pub fn uumain(args: Vec<String>) -> i32 {
     }
 }
 
-fn exec<R: Read, W: Write>(options: Options, mut reader: R, mut writer: W) -> Result<()> {
+fn process_options(options: &Options) -> Result<Option<File>> {
+    // XXX: should we actually be using locked stdin/stdout?
+    // TODO: handle iflag
+    let mut in_file;
+    let stdin;
+    let mut stdin_lock;
+    let reader = if let Some(pathstr) = options.input_file {
+        in_file = Some(crash_if_err!(1, File::open(pathstr)));
+
+        in_file.as_mut().unwrap() as &mut Read
+    } else {
+        // FIXME: afaict GNU dd seems to attempt to reopen stdout if you specify something like
+        // oflag=append
+        stdin = Some(io::stdin());
+        stdin_lock = Some(stdin.as_ref().unwrap().lock());
+
+        stdin_lock.as_mut().unwrap() as &mut Read
+    };
+
+    // work around the borrow checker
+    let mut out_file = None;
+    {
+        // TODO: handle oflag
+        let stdout;
+        let mut stdout_lock;
+        let writer = if let Some(pathstr) = options.output_file {
+            let mut file_options = OpenOptions::new();
+            file_options.write(true)
+                        .create_new(options.conv.contains(&Conversion::Excl))
+                        .create(!options.conv.contains(&Conversion::NoCreate))
+                        .truncate(!options.conv.contains(&Conversion::NoTruncate));
+            if cfg!(unix) {
+                let mut flags = 0;
+                if options.oflag.contains(&Flag::Sync) {
+                    flags |= libc::O_SYNC;
+                }
+                if options.oflag.contains(&Flag::DataSync) {
+                    flags |= libc::O_DSYNC;
+                }
+                file_options.custom_flags(flags);
+            } else {
+                unimplemented!("need to add support for oflag=sync and oflag=dsync on this platform");
+            }
+
+            out_file = Some(crash_if_err!(1, file_options.open(pathstr)));
+
+            out_file.as_mut().unwrap() as &mut Write
+        } else {
+            stdout = Some(io::stdout());
+            stdout_lock = Some(stdout.as_ref().unwrap().lock());
+
+            stdout_lock.as_mut().unwrap() as &mut Write
+        };
+
+        exec(options, reader, writer)?;
+    }
+
+    Ok(out_file)
+}
+
+// TODO: signal handling (including SIGINT, SIGUSR1 on Linux, SIGINFO on BSD/macOS)
+fn exec(options: &Options, reader: &mut Read, writer: &mut Write) -> Result<()> {
     #[derive(Default)]
     struct Block {
         full: u64,
