@@ -4,7 +4,7 @@ matrix:
   include:
     - rust: stable
       os: linux
-      env: FEATURES=''
+      env: FEATURES='' RUSTFLAGS='-C link-dead-code'
     - rust: stable
       os: osx
       env: FEATURES=''
@@ -45,11 +45,18 @@ addons:
   apt:
     packages:
       - libssl-dev
+      - libcurl4-openssl-dev
+      - libelf-dev
+      - libdw-dev
+      - cmake
+      - binutils-dev
+      - libiberty-dev
 
 after_success: |
   if [ "$TRAVIS_OS_NAME" = linux -a "$TRAVIS_RUST_VERSION" = stable ]; then
-    bash <(curl https://raw.githubusercontent.com/xd009642/tarpaulin/master/travis-install.sh)
-    cargo tarpaulin --out Xml
-    bash <(curl -s https://codecov.io/bash)
+    cargo install cargo-kcov
+    bash <(cargo kcov --print-install-kcov-sh)
+    cargo kcov
+    bash <(curl -s https://codecov.io/bash) -f target/cov/kcov-merged/cobertura.xml
   fi
 
